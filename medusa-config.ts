@@ -15,6 +15,8 @@ const normalizeRedisUrl = (url?: string): string | undefined => {
 }
 
 const redisUrl = normalizeRedisUrl(process.env.REDIS_URL)
+const stripeApiKey = process.env.STRIPE_API_KEY?.trim()
+const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim()
 
 // Production modules (event bus, workflow engine, cache, locks) all run on
 // Redis so that a `server` deployment and a `worker` deployment share events
@@ -61,6 +63,31 @@ const redisModules = redisUrl
     ]
   : []
 
+// Register Stripe only when a server-side secret key is configured. The same
+// configuration is loaded by the API server and background worker so payment
+// workflows and webhook events use one provider definition.
+const stripeModules = stripeApiKey
+  ? [
+      {
+        resolve: '@medusajs/medusa/payment',
+        options: {
+          providers: [
+            {
+              resolve: '@medusajs/medusa/payment-stripe',
+              id: 'stripe',
+              options: {
+                apiKey: stripeApiKey,
+                webhookSecret: stripeWebhookSecret,
+                capture: false,
+                automatic_payment_methods: true,
+              },
+            },
+          ],
+        },
+      },
+    ]
+  : []
+
 module.exports = defineConfig({
   projectConfig: {
     databaseUrl: process.env.DATABASE_URL,
@@ -84,5 +111,5 @@ module.exports = defineConfig({
       : process.env.MEDUSA_WORKER_MODE === 'worker',
     backendUrl: process.env.MEDUSA_BACKEND_URL || undefined,
   },
-  modules: redisModules,
+  modules: [...redisModules, ...stripeModules],
 })
