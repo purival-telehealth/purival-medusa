@@ -1,3 +1,4 @@
+
 import { loadEnv, defineConfig } from '@medusajs/framework/utils'
 
 loadEnv(process.env.NODE_ENV || 'development', process.cwd())
@@ -5,8 +6,8 @@ loadEnv(process.env.NODE_ENV || 'development', process.cwd())
 /**
  * Railway's internal Redis proxy resolves to an IPv6 address. ioredis dials
  * IPv6 first and can silently hang when the host only answers on IPv4.
- * Appending `family=0` makes Node try both families (Happy Eyeballs), which
- * is the reliable default on Railway. Idempotent: existing `family=` wins.
+ * Appending family=0 makes Node try both families (Happy Eyeballs), which
+ * is the reliable default on Railway. Idempotent: existing family= wins.
  */
 const normalizeRedisUrl = (url?: string): string | undefined => {
   if (!url) return url
@@ -17,11 +18,16 @@ const normalizeRedisUrl = (url?: string): string | undefined => {
 const redisUrl = normalizeRedisUrl(process.env.REDIS_URL)
 const stripeApiKey = process.env.STRIPE_API_KEY?.trim()
 const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim()
+const s3Bucket = process.env.S3_BUCKET?.trim()
+const s3Endpoint = process.env.S3_ENDPOINT?.trim()
+const s3AccessKeyId = process.env.S3_ACCESS_KEY_ID?.trim()
+const s3SecretAccessKey = process.env.S3_SECRET_ACCESS_KEY?.trim()
+const s3FileUrl = process.env.S3_FILE_URL?.trim()
 
 // Production modules (event bus, workflow engine, cache, locks) all run on
-// Redis so that a `server` deployment and a `worker` deployment share events
+// Redis so that a server deployment and a worker deployment share events
 // and state. Without REDIS_URL (local dev) Medusa falls back to the in-memory
-// defaults, so `npm run dev` works with no extra services.
+// defaults, so npm run dev works with no extra services.
 const redisModules = redisUrl
   ? [
       {
@@ -88,6 +94,36 @@ const stripeModules = stripeApiKey
     ]
   : []
 
+// Railway containers use ephemeral disks, so production product media must
+// be stored outside the container. When all required variables are present,
+// Medusa uploads files to the Purival Cloudflare R2 bucket.
+const fileModules =
+  s3Bucket && s3Endpoint && s3AccessKeyId && s3SecretAccessKey && s3FileUrl
+    ? [
+        {
+          resolve: '@medusajs/medusa/file',
+          options: {
+            providers: [
+              {
+                resolve: '@medusajs/medusa/file-s3',
+                id: 's3',
+                options: {
+                  bucket: s3Bucket,
+                  endpoint: s3Endpoint,
+                  access_key_id: s3AccessKeyId,
+                  secret_access_key: s3SecretAccessKey,
+                  region: process.env.S3_REGION?.trim() || 'auto',
+                  prefix: process.env.S3_PREFIX?.trim() || 'products/',
+                  file_url: s3FileUrl,
+                  additional_client_config: { forcePathStyle: true },
+                },
+              },
+            ],
+          },
+        },
+      ]
+    : []
+
 module.exports = defineConfig({
   projectConfig: {
     databaseUrl: process.env.DATABASE_URL,
@@ -111,5 +147,5 @@ module.exports = defineConfig({
       : process.env.MEDUSA_WORKER_MODE === 'worker',
     backendUrl: process.env.MEDUSA_BACKEND_URL || undefined,
   },
-  modules: [...redisModules, ...stripeModules],
+  modules: [...redisModules, ...stripeModules, ...fileModules],
 })
