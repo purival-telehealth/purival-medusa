@@ -69,29 +69,39 @@ const redisModules = redisUrl
     ]
   : []
 
-// Register Stripe only when a server-side secret key is configured. The same
-// configuration is loaded by the API server and background worker so payment
-// workflows and webhook events use one provider definition.
-const stripeModules = stripeApiKey
-  ? [
-      {
-        resolve: '@medusajs/medusa/payment',
-        options: {
-          providers: [
-            {
-              resolve: '@medusajs/medusa/payment-stripe',
-              id: 'stripe',
-              options: {
-                apiKey: stripeApiKey,
-                webhookSecret: stripeWebhookSecret,
-                capture: false,
-                automatic_payment_methods: true,
-              },
-            },
-          ],
-        },
-      },
-    ]
+// Keep the Stripe provider available for orders originally paid with Stripe.
+const luqraApiKey = process.env.LUQRA_API_KEY?.trim()
+const luqraCaptureSecret = process.env.LUQRA_CAPTURE_SECRET?.trim()
+const luqraCheckoutSecret = process.env.LUQRA_CHECKOUT_SECRET?.trim()
+const luqraEnvironment = process.env.LUQRA_ENVIRONMENT?.trim()
+if (luqraApiKey && (
+  !luqraCaptureSecret || luqraCaptureSecret.length < 32 ||
+  !luqraCheckoutSecret || luqraCheckoutSecret.length < 32 ||
+  !["sandbox", "production"].includes(luqraEnvironment ?? "")
+)) {
+  throw new Error("Luqra requires an environment and separate checkout and capture secrets.")
+}
+
+const paymentProviders = [
+  ...(stripeApiKey ? [{
+    resolve: '@medusajs/medusa/payment-stripe',
+    id: 'stripe',
+    options: {
+      apiKey: stripeApiKey,
+      webhookSecret: stripeWebhookSecret,
+      capture: false,
+      automatic_payment_methods: true,
+    },
+  }] : []),
+  ...(luqraApiKey ? [{
+    resolve: './src/modules/luqra-payment',
+    id: 'luqra',
+    options: { secret: luqraCaptureSecret },
+  }] : []),
+]
+
+const paymentModules = paymentProviders.length
+  ? [{ resolve: '@medusajs/medusa/payment', options: { providers: paymentProviders } }]
   : []
 
 // Railway containers use ephemeral disks, so production product media must
@@ -147,5 +157,5 @@ module.exports = defineConfig({
       : process.env.MEDUSA_WORKER_MODE === 'worker',
     backendUrl: process.env.MEDUSA_BACKEND_URL || undefined,
   },
-  modules: [...redisModules, ...stripeModules, ...fileModules],
+  modules: [...redisModules, ...paymentModules, ...fileModules, { resolve: './src/modules/luqra-checkout' }],
 })
