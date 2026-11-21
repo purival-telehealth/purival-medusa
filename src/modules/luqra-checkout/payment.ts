@@ -28,17 +28,29 @@ export async function lockCheckout<T>(scope: MedusaContainer, id: string, run: (
 
 export async function getCheckout(scope: MedusaContainer, id: string, sessionId: string) {
   const query = scope.resolve(ContainerRegistrationKeys.QUERY)
-  const { data: [cart] } = await query.graph({
-    entity: "cart",
-    fields: ["id", "total", "currency_code", "email", "billing_address.*", "payment_collection.payment_sessions.*"],
-    filters: { id },
-  })
-  const sessions = cart?.payment_collection?.payment_sessions ?? []
+  const [cart, { data: links }] = await Promise.all([
+    scope.resolve(Modules.CART).retrieveCart(id, {
+      select: ["id", "total", "currency_code", "email"],
+      relations: ["billing_address"],
+    }),
+    query.graph({
+      entity: "cart_payment_collection",
+      fields: ["payment_collection_id"],
+      filters: { cart_id: id },
+    }),
+  ])
+  if (links.length !== 1) throw new Error("The checkout must have exactly one payment collection.")
+
+  const collection = await scope.resolve(Modules.PAYMENT).retrievePaymentCollection(
+    links[0].payment_collection_id,
+    { relations: ["payment_sessions"] },
+  )
+  const sessions = collection.payment_sessions ?? []
   const session = sessions[0]
   const sessionMatches = session?.id === sessionId && session.provider_id === providerId
 
   if (
-    !cart || !sessionMatches || sessions.length !== 1 || cart.currency_code !== "usd" ||
+    !sessionMatches || sessions.length !== 1 || cart.currency_code !== "usd" ||
     session.currency_code !== "usd" || usdAmount(cart.total) !== usdAmount(session.amount)
   ) throw new Error("The checkout session changed.")
   return { cart, amount: usdAmount(cart.total) }
