@@ -33,11 +33,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   let declined = false
   try {
     const order = await lockCheckout(req.scope, cartId, async () => {
+      stage = "read-payment-attempt"
+      let [attempt] = await payments.listLuqraAttempts({ cart_id: cartId })
+      if (!attempt && !paymentToken) return null
+
       stage = "validate-cart-and-session"
       const { cart, amount } = await getCheckout(req.scope, cartId, sessionId)
       if (amount !== quotedAmount) throw new Error("The checkout total changed.")
-      stage = "read-payment-attempt"
-      let [attempt] = await payments.listLuqraAttempts({ cart_id: cartId })
       if (attempt && (attempt.id !== sessionId || attempt.amount !== amount)) {
         throw new Error("Luqra payment session changed.")
       }
@@ -49,9 +51,6 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       if (attempt?.state === "declined" && !paymentToken) {
         declined = true
         throw new Error("Luqra declined the payment.")
-      }
-      if (!attempt && !paymentToken) {
-        return null
       }
       if (attempt?.state === "review" || attempt?.state === "pending" || !paymentToken) {
         throw new Error("Luqra payment is still being verified.")
@@ -107,10 +106,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     })
     if (!order) return res.status(404).json({ status: "not_submitted" })
     return res.json({ order })
-  } catch {
-    if (!declined && (paymentToken || stage !== "read-payment-attempt")) {
-      req.scope.resolve(ContainerRegistrationKeys.LOGGER).warn(
-        `Luqra checkout needs verification: stage=${stage} session=${sessionId}`,
+  } catch (error) {
+    if (!declined && (paymentToken || stage === "acquire-lock")) {
+      const kind = error instanceof Error ? error.name : "UnknownError"
+      req.scope.resolve(ContainerRegistrationKeys.LOGGER).error(
+        `Luqra checkout needs verification: stage=${stage} type=${kind}`,
       )
     }
     return declined
