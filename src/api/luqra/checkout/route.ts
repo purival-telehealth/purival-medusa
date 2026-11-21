@@ -1,4 +1,5 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { z } from "zod"
 import {
   attempts, cartPattern, finishCheckout, getCheckout, lockCheckout, sessionPattern,
@@ -28,18 +29,30 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const { cartId, sessionId, paymentToken, amount: quotedAmount } = parsed.data
   const payments = attempts(req.scope)
 
+  let stage = "acquire-lock"
   let declined = false
   try {
     const order = await lockCheckout(req.scope, cartId, async () => {
+      stage = "validate-cart-and-session"
       const { cart, amount } = await getCheckout(req.scope, cartId, sessionId)
       if (amount !== quotedAmount) throw new Error("The checkout total changed.")
+      stage = "read-payment-attempt"
       let [attempt] = await payments.listLuqraAttempts({ cart_id: cartId })
       if (attempt && (attempt.id !== sessionId || attempt.amount !== amount)) {
         throw new Error("Luqra payment session changed.")
       }
 
       if (attempt?.transaction_id && attempt.state === "paid") {
+        stage = "recover-paid-order"
         return finishCheckout(req.scope, cartId, sessionId, amount, async () => attempt.transaction_id)
+      }
+      if (attempt?.state === "declined" && !paymentToken) {
+        declined = true
+        throw new Error("Luqra declined the payment.")
+      }
+      if (!attempt && !paymentToken) {
+        stage = "no-recorded-payment-attempt"
+        throw new Error("No payment attempt has been recorded.")
       }
       if (attempt?.state === "review" || attempt?.state === "pending" || !paymentToken) {
         throw new Error("Luqra payment is still being verified.")
@@ -50,17 +63,20 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       if (!billing || !email) throw new Error("Luqra billing details are unavailable.")
 
       let submitted = false
+      stage = "complete-cart-before-payment"
       return finishCheckout(req.scope, cartId, sessionId, amount, async () => {
         if (submitted) {
           return attempt?.state === "paid" ? attempt.transaction_id : null
         }
         submitted = true
+        stage = "persist-payment-attempt"
         // Persist the claim before contacting the gateway. Only a confirmed
         // decline releases it. Timeouts are reconciled through the webhook.
         attempt = attempt
           ? await payments.updateLuqraAttempts({ id: attempt.id, state: "pending" })
           : await payments.createLuqraAttempts({ id: sessionId, cart_id: cartId, amount, state: "pending" })
 
+        stage = "submit-gateway-sale"
         const result = await transact({
           type: "sale",
           orderid: `${referencePrefix}${sessionId}`,
@@ -84,12 +100,19 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         const transaction = result?.get("transactionid") ?? ""
         if (result?.get("response") !== "1" || !transactionPattern.test(transaction)) return null
 
+        stage = "record-approved-sale"
         attempt = await payments.updateLuqraAttempts({ id: attempt.id, state: "paid", transaction_id: transaction })
+        stage = "complete-paid-order"
         return transaction
       })
     })
     return res.json({ order })
   } catch {
+    if (!declined && (paymentToken || stage !== "read-payment-attempt")) {
+      req.scope.resolve(ContainerRegistrationKeys.LOGGER).warn(
+        `Luqra checkout needs verification: stage=${stage} session=${sessionId}`,
+      )
+    }
     return declined
       ? res.status(402).json({ status: "declined" })
       : res.status(409).json({ status: "pending" })
