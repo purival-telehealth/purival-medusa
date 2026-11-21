@@ -51,8 +51,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         throw new Error("Luqra declined the payment.")
       }
       if (!attempt && !paymentToken) {
-        stage = "no-recorded-payment-attempt"
-        throw new Error("No payment attempt has been recorded.")
+        return null
       }
       if (attempt?.state === "review" || attempt?.state === "pending" || !paymentToken) {
         throw new Error("Luqra payment is still being verified.")
@@ -106,6 +105,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         return transaction
       })
     })
+    if (!order) return res.status(404).json({ status: "not_submitted" })
     return res.json({ order })
   } catch {
     if (!declined && (paymentToken || stage !== "read-payment-attempt")) {
